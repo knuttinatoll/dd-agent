@@ -165,10 +165,10 @@ class ProcessCheck(AgentCheck):
 
 
     def get_process_state(self, name, pids, cpu_check_interval):
-        st = defaultdict(list)
+        st = defaultdict()
 
         for pid in pids:
-            st['pids'].append(pid)
+            st[pid] = {}
 
             try:
                 p = psutil.Process(pid)
@@ -179,30 +179,30 @@ class ProcessCheck(AgentCheck):
                 self.last_pid_cache_ts[name] = 0
 
             meminfo = self.psutil_wrapper(p, 'memory_info', ['rss', 'vms'])
-            st['rss'].append(meminfo.get('rss'))
-            st['vms'].append(meminfo.get('vms'))
+            st[pid]['rss'] = meminfo.get('rss')
+            st[pid]['vms'] = meminfo.get('vms')
 
             # will fail on win32 and solaris
             shared_mem = self.psutil_wrapper(p, 'memory_info_ex', ['shared']).get('shared')
             if shared_mem is not None and meminfo.get('rss') is not None:
-                st['real'].append(meminfo['rss'] - shared_mem)
+                st[pid]['real'] = meminfo['rss'] - shared_mem
             else:
-                st['real'].append(None)
+                st[pid]['real'] = None
 
             ctxinfo = self.psutil_wrapper(p, 'num_ctx_switches', ['voluntary', 'involuntary'])
-            st['ctx_swtch_vol'].append(ctxinfo.get('voluntary'))
-            st['ctx_swtch_invol'].append(ctxinfo.get('involuntary'))
+            st[pid]['ctx_swtch_vol'] = ctxinfo.get('voluntary')
+            st[pid]['ctx_swtch_invol'] = ctxinfo.get('involuntary')
 
-            st['thr'].append(self.psutil_wrapper(p, 'num_threads', None))
-            st['cpu'].append(self.psutil_wrapper(p, 'cpu_percent', None, cpu_check_interval))
+            st[pid]['thr'] = self.psutil_wrapper(p, 'num_threads', None)
+            st[pid]['cpu'] = self.psutil_wrapper(p, 'cpu_percent', None, cpu_check_interval)
 
-            st['open_fd'].append(self.psutil_wrapper(p, 'num_fds', None))
+            st[pid]['open_fd'] = self.psutil_wrapper(p, 'num_fds', None)
 
             ioinfo = self.psutil_wrapper(p, 'io_counters', ['read_count', 'write_count', 'read_bytes', 'write_bytes'])
-            st['r_count'].append(ioinfo.get('read_count'))
-            st['w_count'].append(ioinfo.get('write_count'))
-            st['r_bytes'].append(ioinfo.get('read_bytes'))
-            st['w_bytes'].append(ioinfo.get('write_bytes'))
+            st[pid]['r_count'] = ioinfo.get('read_count')
+            st[pid]['w_count'] = ioinfo.get('write_count')
+            st[pid]['r_bytes'] = ioinfo.get('read_bytes')
+            st[pid]['w_bytes'] = ioinfo.get('write_bytes')
 
         return st
 
@@ -213,6 +213,7 @@ class ProcessCheck(AgentCheck):
         search_string = instance.get('search_string', None)
         ignore_ad = _is_affirmative(instance.get('ignore_denied_access', True))
         cpu_check_interval = instance.get('cpu_check_interval', 0.1)
+        per_process = _is_affirmative(instance.get('per_process', False))
 
         if not isinstance(search_string, list):
             raise KeyError('"search_string" parameter should be a list')
@@ -248,12 +249,17 @@ class ProcessCheck(AgentCheck):
         self.log.debug('ProcessCheck: process %s analysed', name)
         self.gauge('system.processes.number', len(pids), tags=tags)
 
-        for attr, mname in ATTR_TO_METRIC.iteritems():
-            vals = [x for x in proc_state[attr] if x is not None]
-            # skip []
-            if vals:
-                # FIXME 6.x: change this prefix?
-                self.gauge('system.processes.%s' % mname, sum(vals), tags=tags)
+        vals = []
+        for pid, metrics in proc_state.iteritems():
+          for attr, mname in ATTR_TO_METRIC.iteritems():
+            if per_process and proc_state[pid][attr] is not None:
+              self.gauge('system.processes.%s' % mname, proc_state[pid][attr], tags=tags + ['process_pid:%d' % pid])
+            else:
+              vals.append(proc_state[pid][attr])
+
+        if not per_process and vals:
+          # FIXME 6.x: change this prefix?
+          self.gauge('system.processes.%s' % mname, sum(vals), tags=tags)
 
         self._process_service_check(name, len(pids), instance.get('thresholds', None))
 
